@@ -3,8 +3,8 @@ use std::collections::HashMap;
 use agave_feature_set::FeatureSet;
 use itertools::Itertools;
 use litesvm::{
-    LiteSVM,
     types::{FailedTransactionMetadata, SimulatedTransactionInfo, TransactionResult},
+    LiteSVM,
 };
 use solana_account::{Account, AccountSharedData};
 use solana_clock::Clock;
@@ -18,8 +18,8 @@ use solana_transaction::versioned::VersionedTransaction;
 
 use crate::{
     error::{SurfpoolError, SurfpoolResult},
-    storage::{OverlayStorage, Storage, new_kv_store},
-    surfnet::{GetAccountResult, locker::is_supported_token_program},
+    storage::{new_kv_store, OverlayStorage, Storage},
+    surfnet::{locker::is_supported_token_program, GetAccountResult},
 };
 
 #[derive(Clone)]
@@ -327,4 +327,59 @@ fn create_native_mint(svm: &mut SurfnetLiteSvm) {
     };
     svm.set_account(spl_token_interface::native_mint::ID, account)
         .expect("Failed to create native mint account in SVM");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use litesvm::types::TransactionResult;
+    use solana_instruction::Instruction;
+    use solana_keypair::Keypair;
+    use solana_message::{Message, VersionedMessage};
+    use solana_signer::Signer;
+    use solana_transaction::versioned::VersionedTransaction;
+    use solana_transaction_error::TransactionError;
+
+    const ED25519_PROGRAM_ID: Pubkey =
+        Pubkey::from_str_const("Ed25519SigVerify111111111111111111111111111");
+
+    #[test]
+    fn ed25519_precompile_is_available() {
+        let mut svm = SurfnetLiteSvm::new();
+        let payer = Keypair::new();
+
+        assert!(matches!(
+            svm.airdrop(&payer.pubkey(), 1_000_000_000),
+            TransactionResult::Ok(_)
+        ));
+
+        // Intentionally malformed payload: we only care that the runtime reaches
+        // the precompile path instead of rejecting the program id as unsupported.
+        let ed25519_ix = Instruction {
+            program_id: ED25519_PROGRAM_ID,
+            accounts: vec![],
+            data: vec![0],
+        };
+
+        let message = Message::new_with_blockhash(
+            &[ed25519_ix],
+            Some(&payer.pubkey()),
+            &svm.svm.latest_blockhash(),
+        );
+        let tx = VersionedTransaction::try_new(VersionedMessage::Legacy(message), &[&payer])
+            .expect("failed to build tx");
+
+        let result = svm.send_transaction(tx);
+        if let TransactionResult::Err(failure) = result {
+            assert!(
+                !matches!(
+                    failure.err,
+                    TransactionError::InstructionError(0, _)
+                        if format!("{:?}", failure.err).contains("UnsupportedProgramId")
+                ),
+                "ed25519 precompile is not available in runtime: {:?}",
+                failure.err
+            );
+        }
+    }
 }
