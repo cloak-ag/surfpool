@@ -887,10 +887,47 @@ impl SurfnetSvmLocker {
         let limit = config.clone().and_then(|c| c.limit).unwrap_or(1000);
 
         let mut combined_results = results.inner.clone();
-        if combined_results.len() < limit {
-            let mut remote_results = client.get_signatures_for_address(pubkey, config).await?;
-            combined_results.append(&mut remote_results);
+
+        // Fetch from remote with a short timeout and merge — local only has signatures
+        // for transactions processed by this Surfpool instance, but callers may need
+        // mainnet history. Use a timeout to avoid blocking when the address only exists
+        // locally (e.g. program PDAs deployed on Surfpool).
+        let remote_timeout = tokio::time::Duration::from_secs(3);
+        match tokio::time::timeout(
+            remote_timeout,
+            client.get_signatures_for_address(pubkey, config),
+        )
+        .await
+        {
+            Ok(inner) => match inner {
+                Ok(remote_results) => {
+                    let local_sigs: std::collections::HashSet<String> = combined_results
+                        .iter()
+                        .map(|s| s.signature.clone())
+                        .collect();
+                    for sig in remote_results {
+                        if !local_sigs.contains(&sig.signature) {
+                            combined_results.push(sig);
+                        }
+                    }
+                }
+                Err(e) => {
+                    debug!(
+                        "Remote getSignaturesForAddress failed for {}: {} — using local only",
+                        pubkey, e
+                    );
+                }
+            },
+            Err(_) => {
+                debug!(
+                    "Remote getSignaturesForAddress timed out for {} — using local only",
+                    pubkey
+                );
+            }
         }
+
+        combined_results.sort_by(|a, b| b.slot.cmp(&a.slot));
+        combined_results.truncate(limit);
 
         Ok(results.with_new_value(combined_results))
     }
@@ -1146,6 +1183,70 @@ impl SurfnetSvmLocker {
             )
             .await?
             .inner;
+
+        // Re-fetch non-signer writable accounts that were previously fetched from remote.
+        // This keeps DEX pool/reserve accounts fresh without adding latency for accounts
+        // that are locally created (deploy buffers, new PDAs) or not yet cached (fetched
+        // fresh by get_multiple_accounts above). Signer accounts are never refreshed
+        // since their local state (from airdrops/transactions) is authoritative.
+        if let Some((remote_client, commitment_config)) = remote_ctx {
+            let signer_set: std::collections::HashSet<Pubkey> = transaction
+                .signatures
+                .iter()
+                .zip(transaction.message.static_account_keys().iter())
+                .map(|(_, key)| *key)
+                .collect();
+
+            // Only refresh accounts that: (a) writable, (b) not a signer, (c) were fetched
+            // from remote in the get_multiple_accounts call above (do_update=true means remote).
+            let remote_fetched_set: std::collections::HashSet<Pubkey> = account_updates
+                .iter()
+                .filter_map(|u| {
+                    if !u.requires_update() {
+                        return None;
+                    }
+                    match u {
+                        GetAccountResult::FoundAccount(p, _, _)
+                        | GetAccountResult::FoundProgramAccount((p, _), _)
+                        | GetAccountResult::FoundTokenAccount((p, _), _) => Some(*p),
+                        GetAccountResult::None(_) => None,
+                    }
+                })
+                .collect();
+
+            let stale_writable_pubkeys: Vec<Pubkey> = transaction_accounts
+                .iter()
+                .enumerate()
+                .filter_map(|(i, pubkey)| {
+                    if transaction.message.is_maybe_writable(i, None)
+                        && !signer_set.contains(pubkey)
+                        && remote_fetched_set.contains(pubkey)
+                    {
+                        Some(*pubkey)
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+
+            if !stale_writable_pubkeys.is_empty() {
+                debug!(
+                    "Refreshing {} stale writable accounts from remote for tx {}",
+                    stale_writable_pubkeys.len(),
+                    signature
+                );
+                let fresh = remote_client
+                    .get_multiple_accounts(&stale_writable_pubkeys, *commitment_config)
+                    .await?;
+                self.with_svm_writer(|svm_writer| {
+                    for update in &fresh {
+                        if update.requires_update() {
+                            svm_writer.write_account_update(update.clone());
+                        }
+                    }
+                });
+            }
+        }
 
         let readonly_account_states = transaction_accounts
             .iter()
