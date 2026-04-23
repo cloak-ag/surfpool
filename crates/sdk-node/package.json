@@ -1,6 +1,6 @@
 {
   "name": "surfpool-sdk",
-  "version": "0.1.0",
+  "version": "1.2.0",
   "description": "Embed a Surfpool Solana runtime in your Node.js tests",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -52,6 +52,7 @@
     "create-npm-dir": "napi create-npm-dir -t .",
     "artifacts": "napi artifacts",
     "pack:dry-run": "npm pack --dry-run",
+    "prepare-release": "node ./scripts/prepare-release.js",
     "smoke": "npm test",
     "test": "node --test --test-concurrency=1 ./scripts/smoke.js"
   },
@@ -60,8 +61,8 @@
     "typescript": "^5.7.0"
   },
   "optionalDependencies": {
-    "surfpool-sdk-darwin-x64": "0.1.0",
-    "surfpool-sdk-darwin-arm64": "0.1.0",
-    "surfpool-sdk-linux-x64-gnu": "0.1.0"
+    "surfpool-sdk-darwin-x64": "1.2.0",
+    "surfpool-sdk-darwin-arm64": "1.2.0",
+    "surfpool-sdk-linux-x64-gnu": "1.2.0"
   }
 }
