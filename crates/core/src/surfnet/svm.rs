@@ -2001,20 +2001,28 @@ impl SurfnetSvm {
         let root = new_slot.saturating_sub(FINALIZATION_SLOT_THRESHOLD);
         self.notify_slot_subscribers(new_slot, parent_slot, root);
 
-        // Notify geyser plugins of slot status (Confirmed)
+        // cloak-ag: txs that ran during this round were tagged with
+        // `parent_slot` (= pre-increment absolute_slot, = simulated_slot at
+        // tx-processing time per locker.rs:1870/1885/1892). Confirmed slot
+        // status, BlockMetadata, and Entry must all use parent_slot to match
+        // — otherwise the geyser plugin's block-aggregator counts 1 tx for
+        // slot N (from NotifyTransaction) but BlockMetadata says 0 txs for
+        // slot N+1 → "failed to reconstruct -- tx count: 1 vs 0" errors.
+        // Notify geyser plugins of slot status (Confirmed) for the slot
+        // that just finalized.
         self.geyser_events_tx
             .send(GeyserEvent::UpdateSlotStatus {
-                slot: new_slot,
-                parent: Some(parent_slot),
+                slot: parent_slot,
+                parent: parent_slot.checked_sub(1),
                 status: GeyserSlotStatus::Confirmed,
             })
             .ok();
 
-        // Notify geyser plugins of block metadata
+        // Notify geyser plugins of block metadata for the just-finalized slot
         let block_metadata = GeyserBlockMetadata {
-            slot: new_slot,
+            slot: parent_slot,
             blockhash: self.chain_tip.hash.clone(),
-            parent_slot,
+            parent_slot: parent_slot.saturating_sub(1),
             parent_blockhash: previous_chain_tip.hash.clone(),
             block_time: Some(self.updated_at as i64 / 1_000),
             block_height: Some(self.chain_tip.index),
@@ -2030,7 +2038,7 @@ impl SurfnetSvm {
             .map(|h| h.to_bytes().to_vec())
             .unwrap_or_else(|_| vec![0u8; 32]);
         let entry_info = GeyserEntryInfo {
-            slot: new_slot,
+            slot: parent_slot,
             index: 0, // Single entry per block
             num_hashes: 1,
             hash: entry_hash,
