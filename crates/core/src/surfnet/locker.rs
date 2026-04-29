@@ -1596,6 +1596,20 @@ impl SurfnetSvmLocker {
                     ),
                 )?;
 
+                // cloak-ag: emit UpdateSlotStatus(Processed) before
+                // NotifyTransaction so geyser plugins (e.g. yellowstone-grpc)
+                // know the slot exists. Without this, transactions arrive
+                // with no slot context and the plugin's block aggregator
+                // drops them as "unexpected message Transaction" (visible
+                // in the plugin's invalid_full_blocks_total metric).
+                let _ = svm_writer
+                    .geyser_events_tx
+                    .send(GeyserEvent::UpdateSlotStatus {
+                        slot: simulated_slot,
+                        parent: simulated_slot.checked_sub(1),
+                        status: crate::surfnet::GeyserSlotStatus::Processed,
+                    });
+
                 let _ = svm_writer
                     .geyser_events_tx
                     .send(GeyserEvent::NotifyTransaction(
@@ -1776,6 +1790,17 @@ impl SurfnetSvmLocker {
                 let _ = svm_writer
                     .simnet_events_tx
                     .try_send(SimnetEvent::transaction_processed(transaction_meta, None));
+
+                // cloak-ag: emit UpdateSlotStatus(Processed) before
+                // NotifyTransaction. See companion comment at the failed-tx
+                // emit-site above.
+                let _ = svm_writer
+                    .geyser_events_tx
+                    .send(GeyserEvent::UpdateSlotStatus {
+                        slot: simulated_slot,
+                        parent: simulated_slot.checked_sub(1),
+                        status: crate::surfnet::GeyserSlotStatus::Processed,
+                    });
 
                 let _ = svm_writer
                     .geyser_events_tx
